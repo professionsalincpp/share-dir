@@ -1,597 +1,754 @@
-"""
-Modern Windows 11-style GUI application for remote folder access.
-Allows users to either provide access to their folder or connect to a remote folder.
-Uses CustomTkinter for modern UI design.
-"""
-
-import customtkinter as ctk
-import tkinter as tk
-from tkinter import filedialog, messagebox
-import threading
-import socket
-import json
+import flet as ft
 import os
-import hashlib
+import socket
+import threading
+import http.server
+import socketserver
 from pathlib import Path
-from datetime import datetime
+import json
 
-# Configure appearance
-ctk.set_appearance_mode("system")  # System theme (light/dark)
-ctk.set_default_color_theme("blue")  # Modern blue theme
-
-
-class FolderShareApp(ctk.CTk):
-    """Main application window for folder sharing."""
-    
-    def __init__(self):
-        super().__init__()
+class FileShareApp:
+    def __init__(self, page: ft.Page):
+        self.page = page
+        self.page.title = "Folder Share - Windows 11 Style"
+        self.page.theme_mode = ft.ThemeMode.LIGHT
+        self.page.window_width = 900
+        self.page.window_height = 650
+        self.page.padding = 20
+        self.page.spacing = 15
         
-        # Window configuration
-        self.title("Folder Share - Remote Access")
-        self.geometry("900x650")
-        self.minsize(800, 600)
-        
-        # Connection state
+        # Состояние приложения
+        self.current_folder = None
+        self.server_thread = None
+        self.server = None
         self.is_hosting = False
-        self.is_connected = False
-        self.host_thread = None
-        self.client_socket = None
-        self.shared_folder_path = None
+        self.connected_host = None
+        self.current_files = []
         
-        # Configure grid
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        # Получение IP адреса
+        self.local_ip = self.get_local_ip()
         
-        self._create_header()
-        self._create_main_content()
-        self._create_status_bar()
+        # Создание UI
+        self.create_ui()
         
-    def _create_header(self):
-        """Create modern header section."""
-        header_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        header_frame.grid(row=0, column=0, sticky="ew", padx=40, pady=(30, 20))
-        
-        # Title
-        title_label = ctk.CTkLabel(
-            header_frame,
-            text="Folder Share",
-            font=ctk.CTkFont(size=32, weight="bold")
-        )
-        title_label.pack(anchor="w")
-        
-        # Subtitle
-        subtitle_label = ctk.CTkLabel(
-            header_frame,
-            text="Securely share and access folders remotely",
-            font=ctk.CTkFont(size=14),
-            text_color="gray"
-        )
-        subtitle_label.pack(anchor="w", pady=(5, 0))
-        
-    def _create_main_content(self):
-        """Create main content area with two modes."""
-        main_frame = ctk.CTkFrame(self, corner_radius=15, fg_color="transparent")
-        main_frame.grid(row=1, column=0, sticky="nsew", padx=40, pady=20)
-        main_frame.grid_columnconfigure(0, weight=1)
-        main_frame.grid_columnconfigure(1, weight=1)
-        
-        # Host Panel (Provide Access)
-        self.host_panel = self._create_host_panel(main_frame)
-        self.host_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 15))
-        
-        # Client Panel (Remote Access)
-        self.client_panel = self._create_client_panel(main_frame)
-        self.client_panel.grid(row=0, column=1, sticky="nsew", padx=(15, 0))
-        
-    def _create_host_panel(self, parent):
-        """Create the hosting panel for providing folder access."""
-        panel = ctk.CTkFrame(parent, corner_radius=15)
-        panel.grid_rowconfigure(4, weight=1)
-        
-        # Icon/Title
-        icon_label = ctk.CTkLabel(
-            panel,
-            text="📁",
-            font=ctk.CTkFont(size=40)
-        )
-        icon_label.grid(row=0, column=0, pady=(25, 10))
-        
-        title_label = ctk.CTkLabel(
-            panel,
-            text="Provide Access",
-            font=ctk.CTkFont(size=20, weight="bold")
-        )
-        title_label.grid(row=1, column=0)
-        
-        desc_label = ctk.CTkLabel(
-            panel,
-            text="Share your folder with others",
-            font=ctk.CTkFont(size=13),
-            text_color="gray"
-        )
-        desc_label.grid(row=2, column=0, pady=(0, 20))
-        
-        # Folder selection
-        folder_frame = ctk.CTkFrame(panel, fg_color="transparent")
-        folder_frame.grid(row=3, column=0, sticky="ew", padx=25, pady=(0, 15))
-        folder_frame.grid_columnconfigure(0, weight=1)
-        
-        self.host_folder_entry = ctk.CTkEntry(
-            folder_frame,
-            placeholder_text="Select folder to share...",
-            height=40,
-            corner_radius=10
-        )
-        self.host_folder_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        
-        browse_btn = ctk.CTkButton(
-            folder_frame,
-            text="Browse",
-            width=80,
-            height=40,
-            corner_radius=10,
-            command=self._browse_host_folder
-        )
-        browse_btn.grid(row=0, column=1)
-        
-        # Status label
-        self.host_status_label = ctk.CTkLabel(
-            panel,
-            text="Not hosting",
-            font=ctk.CTkFont(size=12),
-            text_color="gray"
-        )
-        self.host_status_label.grid(row=4, column=0, sticky="n", pady=(0, 20))
-        
-        # Action button
-        self.host_action_btn = ctk.CTkButton(
-            panel,
-            text="Start Sharing",
-            height=45,
-            corner_radius=10,
-            font=ctk.CTkFont(size=15, weight="bold"),
-            command=self._toggle_hosting
-        )
-        self.host_action_btn.grid(row=5, column=0, sticky="ew", padx=25, pady=(0, 25))
-        
-        return panel
-        
-    def _create_client_panel(self, parent):
-        """Create the client panel for connecting to remote folders."""
-        panel = ctk.CTkFrame(parent, corner_radius=15)
-        panel.grid_rowconfigure(4, weight=1)
-        
-        # Icon/Title
-        icon_label = ctk.CTkLabel(
-            panel,
-            text="🌐",
-            font=ctk.CTkFont(size=40)
-        )
-        icon_label.grid(row=0, column=0, pady=(25, 10))
-        
-        title_label = ctk.CTkLabel(
-            panel,
-            text="Remote Access",
-            font=ctk.CTkFont(size=20, weight="bold")
-        )
-        title_label.grid(row=1, column=0)
-        
-        desc_label = ctk.CTkLabel(
-            panel,
-            text="Connect to a shared folder",
-            font=ctk.CTkFont(size=13),
-            text_color="gray"
-        )
-        desc_label.grid(row=2, column=0, pady=(0, 20))
-        
-        # Connection inputs
-        inputs_frame = ctk.CTkFrame(panel, fg_color="transparent")
-        inputs_frame.grid(row=3, column=0, sticky="ew", padx=25, pady=(0, 15))
-        inputs_frame.grid_columnconfigure(1, weight=1)
-        
-        # IP Address
-        ip_label = ctk.CTkLabel(inputs_frame, text="IP Address:")
-        ip_label.grid(row=0, column=0, sticky="w", pady=(0, 10))
-        
-        self.client_ip_entry = ctk.CTkEntry(
-            inputs_frame,
-            placeholder_text="192.168.x.x",
-            height=35,
-            corner_radius=10
-        )
-        self.client_ip_entry.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        
-        # Port
-        port_label = ctk.CTkLabel(inputs_frame, text="Port:")
-        port_label.grid(row=0, column=1, sticky="w", padx=(15, 0), pady=(0, 10))
-        
-        self.client_port_entry = ctk.CTkEntry(
-            inputs_frame,
-            placeholder_text="5000",
-            width=80,
-            height=35,
-            corner_radius=10
-        )
-        self.client_port_entry.insert(0, "5000")
-        self.client_port_entry.grid(row=1, column=1, sticky="w", padx=(15, 0), pady=(0, 10))
-        
-        # Status label
-        self.client_status_label = ctk.CTkLabel(
-            panel,
-            text="Not connected",
-            font=ctk.CTkFont(size=12),
-            text_color="gray"
-        )
-        self.client_status_label.grid(row=4, column=0, sticky="n", pady=(0, 20))
-        
-        # Action button
-        self.client_action_btn = ctk.CTkButton(
-            panel,
-            text="Connect",
-            height=45,
-            corner_radius=10,
-            font=ctk.CTkFont(size=15, weight="bold"),
-            command=self._toggle_connection
-        )
-        self.client_action_btn.grid(row=5, column=0, sticky="ew", padx=25, pady=(0, 25))
-        
-        return panel
-        
-    def _create_status_bar(self):
-        """Create modern status bar at bottom."""
-        status_frame = ctk.CTkFrame(self, corner_radius=0, height=50, fg_color="transparent")
-        status_frame.grid(row=2, column=0, sticky="ew", padx=40, pady=(0, 20))
-        
-        # Local IP display
-        local_ip = self._get_local_ip()
-        ip_label = ctk.CTkLabel(
-            status_frame,
-            text=f"Your IP: {local_ip}",
-            font=ctk.CTkFont(size=12),
-            text_color="gray"
-        )
-        ip_label.pack(side="left")
-        
-        # Activity indicator
-        self.activity_indicator = ctk.CTkLabel(
-            status_frame,
-            text="●",
-            font=ctk.CTkFont(size=16),
-            text_color="#4CAF50"
-        )
-        self.activity_indicator.pack(side="right")
-        
-        activity_text = ctk.CTkLabel(
-            status_frame,
-            text="Ready",
-            font=ctk.CTkFont(size=12),
-            text_color="gray"
-        )
-        activity_text.pack(side="right", padx=(0, 5))
-        
-    def _get_local_ip(self):
-        """Get local IP address."""
+    def get_local_ip(self):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
             s.close()
             return ip
-        except Exception:
-            return "Unknown"
-            
-    def _browse_host_folder(self):
-        """Open folder browser dialog."""
-        folder = filedialog.askdirectory(title="Select Folder to Share")
-        if folder:
-            self.host_folder_entry.delete(0, tk.END)
-            self.host_folder_entry.insert(0, folder)
-            
-    def _toggle_hosting(self):
-        """Toggle hosting mode on/off."""
-        if self.is_hosting:
-            self._stop_hosting()
-        else:
-            self._start_hosting()
-            
-    def _start_hosting(self):
-        """Start hosting a folder."""
-        folder_path = self.host_folder_entry.get().strip()
-        
-        if not folder_path:
-            messagebox.showwarning("Warning", "Please select a folder to share")
-            return
-            
-        if not os.path.isdir(folder_path):
-            messagebox.showerror("Error", "Selected path is not a valid directory")
-            return
-            
-        self.shared_folder_path = folder_path
-        self.is_hosting = True
-        
-        # Update UI
-        self.host_action_btn.configure(text="Stop Sharing", fg_color="#e74c3c")
-        self.host_status_label.configure(
-            text=f"Hosting: {folder_path}\nShare your IP with others",
-            text_color="#2ecc71"
+        except:
+            return "127.0.0.1"
+    
+    def create_ui(self):
+        # Заголовок
+        header = ft.Container(
+            content=ft.Column([
+                ft.Text("Folder Share", size=28, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
+                ft.Text("Обмен файлами в стиле Windows 11", size=14, color=ft.colors.GREY_600),
+            ], spacing=5),
+            padding=ft.padding.only(bottom=20),
         )
         
-        # Start server thread
-        self.host_thread = threading.Thread(target=self._run_host_server, daemon=True)
-        self.host_thread.start()
-        
-    def _stop_hosting(self):
-        """Stop hosting."""
-        self.is_hosting = False
-        self.shared_folder_path = None
-        
-        # Update UI
-        self.host_action_btn.configure(text="Start Sharing", fg_color=None)
-        self.host_status_label.configure(
-            text="Not hosting",
-            text_color="gray"
+        # Карточки режимов
+        self.host_card = self.create_mode_card(
+            "Предоставить доступ",
+            "Откройте доступ к своей папке",
+            ft.icons.FOLDER_SHARED,
+            ft.colors.BLUE,
+            self.on_host_click
         )
         
-    def _run_host_server(self):
-        """Run the host server in background thread."""
-        HOST = '0.0.0.0'
-        PORT = 5000
+        self.client_card = self.create_mode_card(
+            "Подключиться",
+            "Получите доступ к удалённой папке",
+            ft.icons.FOLDER_OPEN,
+            ft.colors.GREEN,
+            self.on_client_click
+        )
+        
+        modes_row = ft.Row([
+            self.host_card,
+            self.client_card,
+        ], alignment=ft.MainAxisAlignment.SPACE_EVENLY, spacing=30)
+        
+        # Панель хостинга
+        self.host_panel = self.create_host_panel()
+        
+        # Панель клиента
+        self.client_panel = self.create_client_panel()
+        
+        # Основной контент
+        self.main_content = ft.Column([
+            header,
+            modes_row,
+            self.host_panel,
+            self.client_panel,
+        ], spacing=20, expand=True)
+        
+        self.page.add(self.main_content)
+    
+    def create_mode_card(self, title, subtitle, icon, color, on_click):
+        card = ft.Container(
+            content=ft.Column([
+                ft.Icon(icon, size=50, color=color),
+                ft.Text(title, size=18, weight=ft.FontWeight.BOLD),
+                ft.Text(subtitle, size=13, color=ft.colors.GREY_600, text_align=ft.TextAlign.CENTER),
+                ft.ElevatedButton(
+                    "Выбрать",
+                    icon=ft.icons.ARROW_FORWARD,
+                    on_click=on_click,
+                    style=ft.ButtonStyle(
+                        bgcolor=color,
+                        color=ft.colors.WHITE,
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                    ),
+                ),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=15),
+            width=300,
+            height=280,
+            padding=30,
+            border_radius=16,
+            bgcolor=ft.colors.WHITE,
+            shadow=ft.BoxShadow(
+                spread_radius=1,
+                blur_radius=10,
+                color=ft.colors.BLACK12,
+                offset=ft.Offset(0, 4),
+            ),
+            on_click=on_click,
+        )
+        return card
+    
+    def create_host_panel(self):
+        # Статус сервера
+        self.host_status = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.icons.CIRCLE, size=10, color=ft.colors.GREY),
+                ft.Text("Сервер не запущен", size=14),
+            ], spacing=10),
+            padding=15,
+            border_radius=8,
+            bgcolor=ft.colors.GREY_100,
+        )
+        
+        # Путь к папке
+        self.host_folder_path = ft.TextField(
+            label="Путь к папке",
+            hint_text="Выберите папку для общего доступа",
+            read_only=True,
+            expand=True,
+            border_radius=8,
+        )
+        
+        # Порт
+        self.host_port = ft.TextField(
+            label="Порт",
+            value="8000",
+            width=120,
+            border_radius=8,
+        )
+        
+        # Кнопки управления
+        self.host_btn_select = ft.ElevatedButton(
+            "Выбрать папку",
+            icon=ft.icons.FOLDER,
+            on_click=self.select_host_folder,
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+        )
+        
+        self.host_btn_start = ft.ElevatedButton(
+            "Запустить сервер",
+            icon=ft.icons.PLAY_ARROW,
+            on_click=self.start_server,
+            disabled=True,
+            style=ft.ButtonStyle(
+                bgcolor=ft.colors.GREEN,
+                color=ft.colors.WHITE,
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+        )
+        
+        self.host_btn_stop = ft.ElevatedButton(
+            "Остановить сервер",
+            icon=ft.icons.STOP,
+            on_click=self.stop_server,
+            disabled=True,
+            style=ft.ButtonStyle(
+                bgcolor=ft.colors.RED,
+                color=ft.colors.WHITE,
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+        )
+        
+        # Информация для подключения
+        self.host_connection_info = ft.Container(
+            visible=False,
+            content=ft.Column([
+                ft.Divider(),
+                ft.Text("Данные для подключения:", weight=ft.FontWeight.BOLD),
+                ft.Text("IP адрес:", size=13),
+                ft.Container(
+                    content=ft.Text("", size=16, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
+                    padding=10,
+                    border_radius=6,
+                    bgcolor=ft.colors.BLUE_50,
+                ),
+                ft.Text("Порт:", size=13),
+                ft.Container(
+                    content=ft.Text("", size=16, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
+                    padding=10,
+                    border_radius=6,
+                    bgcolor=ft.colors.BLUE_50,
+                ),
+            ], spacing=8),
+            padding=15,
+            border_radius=8,
+            bgcolor=ft.colors.WHITE,
+            border=ft.border.all(1, ft.colors.BLUE_100),
+        )
+        
+        # Список файлов (превью)
+        self.host_file_list = ft.ListView(
+            expand=True,
+            spacing=5,
+            height=200,
+        )
+        
+        panel = ft.Container(
+            content=ft.Column([
+                ft.Text("Предоставление доступа", size=18, weight=ft.FontWeight.BOLD),
+                self.host_status,
+                ft.Row([self.host_folder_path, self.host_btn_select], spacing=10, expand=True),
+                ft.Row([self.host_port, self.host_btn_start, self.host_btn_stop], spacing=10),
+                self.host_connection_info,
+                ft.Text("Файлы в папке:", size=14, weight=ft.FontWeight.BOLD),
+                self.host_file_list,
+            ], spacing=15),
+            padding=25,
+            border_radius=16,
+            bgcolor=ft.colors.WHITE,
+            shadow=ft.BoxShadow(spread_radius=1, blur_radius=10, color=ft.colors.BLACK12, offset=ft.Offset(0, 4)),
+            visible=False,
+            expand=True,
+        )
+        
+        return panel
+    
+    def create_client_panel(self):
+        # Поля подключения
+        self.client_host = ft.TextField(
+            label="IP адрес хоста",
+            hint_text="192.168.x.x",
+            width=200,
+            border_radius=8,
+        )
+        
+        self.client_port = ft.TextField(
+            label="Порт",
+            value="8000",
+            width=120,
+            border_radius=8,
+        )
+        
+        self.client_btn_connect = ft.ElevatedButton(
+            "Подключиться",
+            icon=ft.icons.CONNECT_WITHOUT_CONTACT,
+            on_click=self.connect_to_host,
+            style=ft.ButtonStyle(
+                bgcolor=ft.colors.BLUE,
+                color=ft.colors.WHITE,
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+        )
+        
+        self.client_btn_disconnect = ft.ElevatedButton(
+            "Отключиться",
+            icon=ft.icons.DISCONNECT,
+            on_click=self.disconnect_from_host,
+            disabled=True,
+            style=ft.ButtonStyle(
+                bgcolor=ft.colors.RED,
+                color=ft.colors.WHITE,
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+        )
+        
+        # Статус подключения
+        self.client_status = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.icons.CIRCLE, size=10, color=ft.colors.GREY),
+                ft.Text("Не подключено", size=14),
+            ], spacing=10),
+            padding=15,
+            border_radius=8,
+            bgcolor=ft.colors.GREY_100,
+        )
+        
+        # Навигация по пути
+        self.client_path_display = ft.TextField(
+            label="Текущий путь",
+            read_only=True,
+            expand=True,
+            border_radius=8,
+        )
+        
+        self.client_btn_up = ft.IconButton(
+            ft.icons.ARROW_UPWARD,
+            tooltip="Наверх",
+            on_click=self.navigate_up,
+            disabled=True,
+        )
+        
+        self.client_btn_refresh = ft.IconButton(
+            ft.icons.REFRESH,
+            tooltip="Обновить",
+            on_click=self.refresh_files,
+            disabled=True,
+        )
+        
+        # Список файлов
+        self.client_file_list = ft.ListView(
+            expand=True,
+            spacing=5,
+        )
+        
+        # Редактор файлов
+        self.editor_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Редактирование файла"),
+            content=ft.Column([
+                ft.Text("", size=12, color=ft.colors.GREY_600),
+                ft.TextField(
+                    multiline=True,
+                    min_lines=15,
+                    max_lines=25,
+                    expand=True,
+                    border_radius=8,
+                ),
+            ], tight=True, expand=True),
+            actions=[
+                ft.TextButton("Отмена", on_click=self.close_editor),
+                ft.TextButton("Сохранить", on_click=self.save_file, style=ft.ButtonStyle(bgcolor=ft.colors.BLUE, color=ft.colors.WHITE)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        
+        panel = ft.Container(
+            content=ft.Column([
+                ft.Text("Удалённый доступ", size=18, weight=ft.FontWeight.BOLD),
+                self.client_status,
+                ft.Row([
+                    self.client_host,
+                    self.client_port,
+                    self.client_btn_connect,
+                    self.client_btn_disconnect,
+                ], spacing=10),
+                ft.Row([
+                    self.client_btn_up,
+                    self.client_btn_refresh,
+                    self.client_path_display,
+                ], spacing=10, expand=True),
+                self.client_file_list,
+            ], spacing=15),
+            padding=25,
+            border_radius=16,
+            bgcolor=ft.colors.WHITE,
+            shadow=ft.BoxShadow(spread_radius=1, blur_radius=10, color=ft.colors.BLACK12, offset=ft.Offset(0, 4)),
+            visible=False,
+            expand=True,
+        )
+        
+        return panel
+    
+    def on_host_click(self, e):
+        self.host_panel.visible = True
+        self.client_panel.visible = False
+        self.page.update()
+    
+    def on_client_click(self, e):
+        self.client_panel.visible = True
+        self.host_panel.visible = False
+        self.page.update()
+    
+    def select_host_folder(self, e):
+        # В реальном приложении здесь был бы диалог выбора папки
+        # Для демонстрации используем домашнюю директорию
+        home = str(Path.home())
+        self.host_folder_path.value = home
+        self.current_folder = home
+        self.host_btn_start.disabled = False
+        self.update_host_file_list()
+        self.page.update()
+    
+    def update_host_file_list(self):
+        self.host_file_list.controls.clear()
+        if not self.current_folder:
+            return
         
         try:
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server_socket.bind((HOST, PORT))
-            server_socket.listen(1)
-            server_socket.settimeout(1.0)
+            items = sorted(os.listdir(self.current_folder))
+            for item in items[:20]:  # Показываем первые 20
+                is_dir = os.path.isdir(os.path.join(self.current_folder, item))
+                icon = ft.icons.FOLDER if is_dir else ft.icons.INSERT_DRIVE_FILE
+                color = ft.colors.AMBER if is_dir else ft.colors.BLUE_700
+                self.host_file_list.controls.append(
+                    ft.ListTile(
+                        leading=ft.Icon(icon, color=color),
+                        title=ft.Text(item, size=13),
+                        dense=True,
+                    )
+                )
+        except Exception as ex:
+            self.host_file_list.controls.append(
+                ft.ListTile(title=ft.Text(f"Ошибка: {str(ex)}", color=ft.colors.RED))
+            )
+    
+    def start_server(self, e):
+        if not self.current_folder:
+            return
+        
+        port = int(self.host_port.value)
+        
+        class CustomHandler(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=self.current_folder, **kwargs)
             
-            while self.is_hosting:
+            def do_GET(self):
+                if self.path.startswith('/api/files'):
+                    self.send_json_response(self.list_files())
+                elif self.path.startswith('/api/file?'):
+                    path = self.path.split('path=')[1] if 'path=' in self.path else ''
+                    self.serve_file(path)
+                elif self.path.startswith('/api/save'):
+                    self.save_file_handler()
+                else:
+                    super().do_GET()
+            
+            def do_POST(self):
+                if self.path.startswith('/api/save'):
+                    self.save_file_handler()
+                else:
+                    super().do_POST()
+            
+            def list_files(self):
+                path = self.path.split('path=')[1] if 'path=' in self.path else ''
+                full_path = os.path.join(self.current_folder, path) if path else self.current_folder
                 try:
-                    client_sock, addr = server_socket.accept()
-                    self._handle_client(client_sock, addr)
-                except socket.timeout:
-                    continue
-                except Exception as e:
-                    if self.is_hosting:
-                        print(f"Server error: {e}")
-                        
-        except Exception as e:
-            print(f"Failed to start server: {e}")
-        finally:
-            try:
-                server_socket.close()
-            except:
-                pass
+                    items = []
+                    for item in sorted(os.listdir(full_path)):
+                        item_path = os.path.join(full_path, item)
+                        items.append({
+                            'name': item,
+                            'is_dir': os.path.isdir(item_path),
+                            'size': os.path.getsize(item_path) if os.path.isfile(item_path) else 0,
+                        })
+                    return {'success': True, 'files': items, 'path': full_path}
+                except Exception as ex:
+                    return {'success': False, 'error': str(ex)}
+            
+            def serve_file(self, path):
+                import urllib.parse
+                path = urllib.parse.unquote(path)
+                full_path = os.path.join(self.current_folder, path)
+                if os.path.exists(full_path) and os.path.isfile(full_path):
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/octet-stream')
+                    self.send_header('Content-Disposition', f'attachment; filename="{os.path.basename(full_path)}"')
+                    self.end_headers()
+                    with open(full_path, 'rb') as f:
+                        self.wfile.write(f.read())
+                else:
+                    self.send_error(404)
+            
+            def save_file_handler(self):
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data.decode('utf-8'))
                 
-    def _handle_client(self, client_sock, addr):
-        """Handle client connection."""
-        try:
-            client_sock.settimeout(30.0)
-            
-            # Send folder listing
-            if self.shared_folder_path:
-                files = self._list_files(self.shared_folder_path)
-                response = json.dumps({"status": "success", "files": files})
-                client_sock.sendall(response.encode())
+                file_path = data.get('path', '')
+                content = data.get('content', '')
                 
-                # Receive request
-                data = client_sock.recv(4096).decode()
-                if data:
-                    request = json.loads(data)
-                    if request.get("action") == "download":
-                        file_path = request.get("file")
-                        if file_path:
-                            full_path = os.path.join(self.shared_folder_path, file_path)
-                            if os.path.isfile(full_path):
-                                self._send_file(client_sock, full_path)
-                                
-        except Exception as e:
-            print(f"Client handler error: {e}")
-        finally:
-            client_sock.close()
+                full_path = os.path.join(self.current_folder, file_path)
+                try:
+                    with open(full_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    self.send_json_response({'success': True})
+                except Exception as ex:
+                    self.send_json_response({'success': False, 'error': str(ex)})
             
-    def _list_files(self, folder_path):
-        """List files in folder."""
-        files = []
-        try:
-            for item in os.listdir(folder_path):
-                item_path = os.path.join(folder_path, item)
-                files.append({
-                    "name": item,
-                    "is_dir": os.path.isdir(item_path),
-                    "size": os.path.getsize(item_path) if os.path.isfile(item_path) else 0,
-                    "modified": datetime.fromtimestamp(os.path.getmtime(item_path)).isoformat()
-                })
-        except Exception as e:
-            print(f"Error listing files: {e}")
-        return files
+            def send_json_response(self, data):
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(data).encode('utf-8'))
         
-    def _send_file(self, sock, file_path):
-        """Send file to client."""
         try:
-            with open(file_path, 'rb') as f:
-                chunk = f.read(4096)
-                while chunk:
-                    sock.sendall(chunk)
-                    chunk = f.read(4096)
-        except Exception as e:
-            print(f"Error sending file: {e}")
+            self.server = socketserver.TCPServer(("", port), CustomHandler)
+            self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            self.server_thread.start()
             
-    def _toggle_connection(self):
-        """Toggle client connection."""
-        if self.is_connected:
-            self._disconnect()
-        else:
-            self._connect()
+            self.is_hosting = True
+            self.host_status.content = ft.Row([
+                ft.Icon(ft.icons.CIRCLE, size=10, color=ft.colors.GREEN),
+                ft.Text("Сервер запущен", size=14, color=ft.colors.GREEN_700),
+            ], spacing=10)
             
-    def _connect(self):
-        """Connect to remote host."""
-        ip = self.client_ip_entry.get().strip()
-        port_str = self.client_port_entry.get().strip()
+            self.host_btn_start.disabled = True
+            self.host_btn_stop.disabled = False
+            self.host_port.disabled = True
+            
+            # Показать информацию для подключения
+            self.host_connection_info.content.controls[2].value = f"{self.local_ip}"
+            self.host_connection_info.content.controls[4].value = f"{port}"
+            self.host_connection_info.visible = True
+            
+            self.page.update()
+            
+        except Exception as ex:
+            ft.alert(self.page, f"Ошибка запуска сервера: {str(ex)}")
+    
+    def stop_server(self, e):
+        if self.server:
+            self.server.shutdown()
+            self.server = None
+            self.server_thread = None
         
-        if not ip:
-            messagebox.showwarning("Warning", "Please enter IP address")
+        self.is_hosting = False
+        self.host_status.content = ft.Row([
+            ft.Icon(ft.icons.CIRCLE, size=10, color=ft.colors.GREY),
+            ft.Text("Сервер остановлен", size=14),
+        ], spacing=10)
+        
+        self.host_btn_start.disabled = False
+        self.host_btn_stop.disabled = True
+        self.host_port.disabled = False
+        self.host_connection_info.visible = False
+        
+        self.page.update()
+    
+    def connect_to_host(self, e):
+        host = self.client_host.value.strip()
+        port = self.client_port.value.strip()
+        
+        if not host or not port:
+            ft.alert(self.page, "Введите IP адрес и порт")
             return
-            
-        try:
-            port = int(port_str) if port_str else 5000
-        except ValueError:
-            messagebox.showerror("Error", "Invalid port number")
-            return
-            
-        # Connect in thread
-        threading.Thread(
-            target=self._connect_thread,
-            args=(ip, port),
-            daemon=True
-        ).start()
         
-    def _connect_thread(self, ip, port):
-        """Connection thread."""
         try:
-            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.client_socket.settimeout(5.0)
-            self.client_socket.connect((ip, port))
+            # Проверка подключения
+            import urllib.request
+            url = f"http://{host}:{port}/api/files"
+            response = urllib.request.urlopen(url, timeout=5)
+            data = json.loads(response.read().decode('utf-8'))
             
-            # Receive folder listing
-            data = self.client_socket.recv(65536).decode()
-            response = json.loads(data)
-            
-            if response.get("status") == "success":
-                self.is_connected = True
+            if data.get('success'):
+                self.connected_host = f"{host}:{port}"
+                self.current_files = data.get('files', [])
                 
-                # Update UI in main thread
-                self.after(0, lambda: self._on_connect_success(ip, response.get("files", [])))
+                self.client_status.content = ft.Row([
+                    ft.Icon(ft.icons.CIRCLE, size=10, color=ft.colors.GREEN),
+                    ft.Text(f"Подключено к {host}:{port}", size=14, color=ft.colors.GREEN_700),
+                ], spacing=10)
+                
+                self.client_btn_connect.disabled = True
+                self.client_btn_disconnect.disabled = False
+                self.client_btn_refresh.disabled = False
+                self.client_btn_up.disabled = False
+                
+                self.client_path_display.value = data.get('path', '')
+                self.update_client_file_list(data.get('files', []), data.get('path', ''))
+                
+                self.page.update()
             else:
-                self.after(0, lambda: messagebox.showerror("Error", "Failed to connect"))
+                ft.alert(self.page, f"Ошибка: {data.get('error', 'Неизвестная ошибка')}")
                 
-        except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Connection Error", str(e)))
-            
-    def _on_connect_success(self, ip, files):
-        """Handle successful connection."""
-        self.client_action_btn.configure(text="Disconnect", fg_color="#e74c3c")
-        self.client_status_label.configure(
-            text=f"Connected to: {ip}\n{len(files)} items available",
-            text_color="#2ecc71"
-        )
+        except Exception as ex:
+            ft.alert(self.page, f"Не удалось подключиться: {str(ex)}")
+    
+    def disconnect_from_host(self, e):
+        self.connected_host = None
+        self.current_files = []
         
-        # Show files in simple dialog
-        self._show_remote_files(files)
+        self.client_status.content = ft.Row([
+            ft.Icon(ft.icons.CIRCLE, size=10, color=ft.colors.GREY),
+            ft.Text("Отключено", size=14),
+        ], spacing=10)
         
-    def _show_remote_files(self, files):
-        """Show remote files in a new window."""
-        files_window = ctk.CTkToplevel(self)
-        files_window.title("Remote Files")
-        files_window.geometry("700x500")
+        self.client_btn_connect.disabled = False
+        self.client_btn_disconnect.disabled = True
+        self.client_btn_refresh.disabled = True
+        self.client_btn_up.disabled = True
+        self.client_file_list.controls.clear()
+        self.client_path_display.value = ""
         
-        # Create scrollable frame
-        scroll_frame = ctk.CTkScrollableFrame(files_window, corner_radius=0)
-        scroll_frame.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        # Header
-        header = ctk.CTkLabel(
-            scroll_frame,
-            text="Available Files",
-            font=ctk.CTkFont(size=18, weight="bold")
-        )
-        header.pack(anchor="w", pady=(0, 15))
-        
-        # File list
-        for file_info in files:
-            file_frame = ctk.CTkFrame(scroll_frame, corner_radius=10)
-            file_frame.pack(fill="x", pady=5)
-            
-            icon = "📁" if file_info.get("is_dir") else "📄"
-            name = file_info.get("name", "Unknown")
-            size = file_info.get("size", 0)
-            size_str = f"{size / 1024:.1f} KB" if size < 1048576 else f"{size / 1048576:.1f} MB"
-            
-            icon_label = ctk.CTkLabel(file_frame, text=icon, font=ctk.CTkFont(size=20))
-            icon_label.pack(side="left", padx=(15, 10), pady=10)
-            
-            name_label = ctk.CTkLabel(
-                file_frame,
-                text=name,
-                font=ctk.CTkFont(size=14),
-                anchor="w"
-            )
-            name_label.pack(side="left", fill="x", expand=True, pady=10)
-            
-            if not file_info.get("is_dir"):
-                size_label = ctk.CTkLabel(
-                    file_frame,
-                    text=size_str,
-                    text_color="gray",
-                    font=ctk.CTkFont(size=12)
-                )
-                size_label.pack(side="left", padx=(0, 15), pady=10)
-                
-                download_btn = ctk.CTkButton(
-                    file_frame,
-                    text="Download",
-                    width=80,
-                    height=30,
-                    corner_radius=8,
-                    command=lambda f=name: self._download_file(f)
-                )
-                download_btn.pack(side="right", padx=(0, 15), pady=10)
-                
-    def _download_file(self, filename):
-        """Download file from remote host."""
-        if not self.client_socket:
-            messagebox.showerror("Error", "Not connected")
+        self.page.update()
+    
+    def navigate_up(self, e):
+        if not self.connected_host:
             return
-            
-        try:
-            # Request file
-            request = json.dumps({"action": "download", "file": filename})
-            self.client_socket.sendall(request.encode())
-            
-            # Save dialog
-            save_path = filedialog.asksaveasfilename(
-                defaultextension=".*",
-                initialfile=filename,
-                title="Save File"
-            )
-            
-            if save_path:
-                # Receive file
-                with open(save_path, 'wb') as f:
-                    while True:
-                        chunk = self.client_socket.recv(4096)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        
-                messagebox.showinfo("Success", f"File saved to: {save_path}")
-                
-        except Exception as e:
-            messagebox.showerror("Download Error", str(e))
-            
-    def _disconnect(self):
-        """Disconnect from remote host."""
-        self.is_connected = False
         
-        if self.client_socket:
-            try:
-                self.client_socket.close()
-            except:
-                pass
-            self.client_socket = None
+        current_path = self.client_path_display.value
+        parent_path = str(Path(current_path).parent)
+        
+        try:
+            import urllib.request
+            host, port = self.connected_host.split(':')
+            url = f"http://{host}:{port}/api/files?path={urllib.parse.quote(parent_path)}"
+            response = urllib.request.urlopen(url, timeout=5)
+            data = json.loads(response.read().decode('utf-8'))
             
-        # Update UI
-        self.client_action_btn.configure(text="Connect", fg_color=None)
-        self.client_status_label.configure(
-            text="Not connected",
-            text_color="gray"
-        )
+            if data.get('success'):
+                self.current_files = data.get('files', [])
+                self.client_path_display.value = data.get('path', '')
+                self.update_client_file_list(data.get('files', []), data.get('path', ''))
+                self.page.update()
+        except Exception as ex:
+            ft.alert(self.page, f"Ошибка навигации: {str(ex)}")
+    
+    def refresh_files(self, e):
+        if not self.connected_host:
+            return
+        
+        try:
+            import urllib.request
+            import urllib.parse
+            host, port = self.connected_host.split(':')
+            current_path = self.client_path_display.value
+            url = f"http://{host}:{port}/api/files?path={urllib.parse.quote(current_path)}"
+            response = urllib.request.urlopen(url, timeout=5)
+            data = json.loads(response.read().decode('utf-8'))
+            
+            if data.get('success'):
+                self.current_files = data.get('files', [])
+                self.update_client_file_list(data.get('files', []), data.get('path', ''))
+                self.page.update()
+        except Exception as ex:
+            ft.alert(self.page, f"Ошибка обновления: {str(ex)}")
+    
+    def update_client_file_list(self, files, path):
+        self.client_file_list.controls.clear()
+        
+        for file_info in files:
+            name = file_info['name']
+            is_dir = file_info['is_dir']
+            size = file_info.get('size', 0)
+            
+            icon = ft.icons.FOLDER if is_dir else ft.icons.INSERT_DRIVE_FILE
+            color = ft.colors.AMBER if is_dir else ft.colors.BLUE_700
+            
+            tile = ft.ListTile(
+                leading=ft.Icon(icon, color=color),
+                title=ft.Text(name, size=13),
+                subtitle=ft.Text(f"{size} байт" if not is_dir else "Папка", size=11, color=ft.colors.GREY_600),
+                trailing=ft.Row([
+                    ft.IconButton(
+                        ft.icons.DOWNLOAD,
+                        tooltip="Скачать",
+                        on_click=lambda e, n=name: self.download_file(n),
+                        disabled=is_dir,
+                        icon_size=18,
+                    ),
+                    ft.IconButton(
+                        ft.icons.EDIT,
+                        tooltip="Редактировать",
+                        on_click=lambda e, n=name: self.open_editor(n),
+                        disabled=is_dir,
+                        icon_size=18,
+                    ),
+                ]) if not is_dir else None,
+                dense=True,
+            )
+            self.client_file_list.controls.append(tile)
+    
+    def download_file(self, filename):
+        if not self.connected_host:
+            return
+        
+        try:
+            import urllib.request
+            import urllib.parse
+            host, port = self.connected_host.split(':')
+            current_path = self.client_path_display.value
+            full_path = os.path.join(current_path, filename)
+            url = f"http://{host}:{port}/api/file?path={urllib.parse.quote(full_path)}"
+            
+            # Сохранение файла
+            save_path = os.path.join(str(Path.home()), 'Downloads', filename)
+            urllib.request.urlretrieve(url, save_path)
+            
+            ft.alert(self.page, f"Файл сохранён: {save_path}")
+        except Exception as ex:
+            ft.alert(self.page, f"Ошибка скачивания: {str(ex)}")
+    
+    def open_editor(self, filename):
+        if not self.connected_host:
+            return
+        
+        try:
+            import urllib.request
+            import urllib.parse
+            host, port = self.connected_host.split(':')
+            current_path = self.client_path_display.value
+            full_path = os.path.join(current_path, filename)
+            
+            # Чтение содержимого файла
+            url = f"http://{host}:{port}/api/file?path={urllib.parse.quote(full_path)}"
+            response = urllib.request.urlopen(url, timeout=5)
+            content = response.read().decode('utf-8')
+            
+            # Настройка редактора
+            self.editor_dialog.title = ft.Text(f"Редактирование: {filename}")
+            self.editor_dialog.content.controls[0].value = full_path
+            self.editor_dialog.content.controls[1].value = content
+            
+            self.page.dialog = self.editor_dialog
+            self.editor_dialog.open = True
+            self.page.update()
+            
+        except Exception as ex:
+            ft.alert(self.page, f"Ошибка открытия файла: {str(ex)}")
+    
+    def close_editor(self, e):
+        self.editor_dialog.open = False
+        self.page.update()
+    
+    def save_file(self, e):
+        if not self.connected_host:
+            return
+        
+        try:
+            import urllib.request
+            import json
+            
+            host, port = self.connected_host.split(':')
+            file_path = self.editor_dialog.content.controls[0].value
+            content = self.editor_dialog.content.controls[1].value
+            
+            # Отправка данных на сервер
+            data = json.dumps({'path': file_path, 'content': content}).encode('utf-8')
+            req = urllib.request.Request(
+                f"http://{host}:{port}/api/save",
+                data=data,
+                headers={'Content-Type': 'application/json'},
+                method='POST'
+            )
+            response = urllib.request.urlopen(req, timeout=5)
+            result = json.loads(response.read().decode('utf-8'))
+            
+            if result.get('success'):
+                ft.alert(self.page, "Файл успешно сохранён!")
+                self.close_editor(e)
+                self.refresh_files(e)
+            else:
+                ft.alert(self.page, f"Ошибка сохранения: {result.get('error', 'Неизвестная ошибка')}")
+                
+        except Exception as ex:
+            ft.alert(self.page, f"Ошибка сохранения: {str(ex)}")
 
 
-def main():
-    """Main entry point."""
-    app = FolderShareApp()
-    app.mainloop()
+def main(page: ft.Page):
+    app = FileShareApp(page)
 
-
-if __name__ == "__main__":
-    main()
+ft.app(target=main)
