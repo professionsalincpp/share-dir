@@ -1,37 +1,490 @@
-import flet as ft
-import os
-import socket
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Современное приложение для обмена файлами в стиле Windows 11
+Использует CustomTkinter с улучшенным интерфейсом и полноценным редактированием файлов
+"""
+
+import customtkinter as ctk
+from tkinter import filedialog, messagebox
 import threading
+import socket
+import os
+import json
+import hashlib
+from pathlib import Path
+from datetime import datetime
 import http.server
 import socketserver
-from pathlib import Path
-import json
+import urllib.parse
+from io import BytesIO
 
-class FileShareApp:
-    def __init__(self, page: ft.Page):
-        self.page = page
-        self.page.title = "Folder Share - Windows 11 Style"
-        self.page.theme_mode = ft.ThemeMode.LIGHT
-        self.page.window_width = 900
-        self.page.window_height = 650
-        self.page.padding = 20
-        self.page.spacing = 15
+# Настройка темы
+ctk.set_appearance_mode("system")
+ctk.set_default_color_theme("blue")
+
+class FileEditorWindow(ctk.CTkToplevel):
+    """Окно редактора файлов"""
+    
+    def __init__(self, parent, filepath, save_callback=None):
+        super().__init__(parent)
+        
+        self.filepath = filepath
+        self.save_callback = save_callback
+        self.title(f"Редактор: {os.path.basename(filepath)}")
+        self.geometry("800x600")
+        self.minsize(600, 400)
+        
+        # Настройка окна
+        self.transient(parent)
+        self.grab_set()
+        
+        # Конфигурация сетки
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=0)
+        self.grid_rowconfigure(1, weight=1)
+        
+        # Верхняя панель
+        self.top_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.top_frame.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 10))
+        self.top_frame.grid_columnconfigure(0, weight=1)
+        
+        # Label с именем файла
+        self.file_label = ctk.CTkLabel(
+            self.top_frame, 
+            text=os.path.basename(filepath),
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        self.file_label.grid(row=0, column=0, sticky="w")
+        
+        # Кнопки
+        self.btn_frame = ctk.CTkFrame(self.top_frame, fg_color="transparent")
+        self.btn_frame.grid(row=0, column=1, padx=10)
+        
+        self.save_btn = ctk.CTkButton(
+            self.btn_frame,
+            text="💾 Сохранить",
+            command=self.save_file,
+            width=120,
+            height=32
+        )
+        self.save_btn.grid(row=0, column=0, padx=5)
+        
+        self.close_btn = ctk.CTkButton(
+            self.btn_frame,
+            text="✕ Закрыть",
+            command=self.destroy,
+            fg_color="#e74c3c",
+            hover_color="#c0392b",
+            width=120,
+            height=32
+        )
+        self.close_btn.grid(row=0, column=1, padx=5)
+        
+        # Текстовый редактор
+        self.text_frame = ctk.CTkFrame(self, corner_radius=10)
+        self.text_frame.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 20))
+        self.text_frame.grid_columnconfigure(0, weight=1)
+        self.text_frame.grid_rowconfigure(0, weight=1)
+        
+        self.textbox = ctk.CTkTextbox(
+            self.text_frame,
+            font=ctk.CTkFont(family="Consolas", size=14),
+            wrap="char",
+            corner_radius=0
+        )
+        self.textbox.grid(row=0, column=0, sticky="nsew")
+        
+        # Загрузка содержимого файла
+        self.load_file()
+        
+        # Статус бар
+        self.status_label = ctk.CTkLabel(
+            self,
+            text="Готово",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        self.status_label.grid(row=2, column=0, sticky="w", padx=20, pady=(0, 10))
+    
+    def load_file(self):
+        """Загрузить содержимое файла"""
+        try:
+            with open(self.filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            self.textbox.insert("0.0", content)
+            self.status_label.configure(text=f"Загружено {len(content)} символов")
+        except UnicodeDecodeError:
+            try:
+                with open(self.filepath, 'r', encoding='latin-1') as f:
+                    content = f.read()
+                self.textbox.insert("0.0", content)
+                self.status_label.configure(text="Загружено (кодировка latin-1)")
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Не удалось прочитать файл:\n{str(e)}")
+                self.destroy()
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось прочитать файл:\n{str(e)}")
+            self.destroy()
+    
+    def save_file(self):
+        """Сохранить файл"""
+        try:
+            content = self.textbox.get("0.0", "end-1c")
+            with open(self.filepath, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            self.status_label.configure(text="✓ Файл сохранён")
+            
+            if self.save_callback:
+                self.save_callback(self.filepath)
+            
+            # Анимация успешного сохранения
+            self.save_btn.configure(text="✓ Сохранено", fg_color="#27ae60")
+            self.after(1500, lambda: self.save_btn.configure(
+                text="💾 Сохранить", 
+                fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"]
+            ))
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{str(e)}")
+            self.status_label.configure(text="✕ Ошибка сохранения")
+
+
+class FolderShareApp(ctk.CTk):
+    """Основное приложение"""
+    
+    def __init__(self):
+        super().__init__()
+        
+        self.title("Folder Share Pro")
+        self.geometry("1000x700")
+        self.minsize(800, 600)
         
         # Состояние приложения
         self.current_folder = None
+        self.is_server_running = False
         self.server_thread = None
-        self.server = None
-        self.is_hosting = False
+        self.httpd = None
         self.connected_host = None
-        self.current_files = []
+        self.current_path = None
         
-        # Получение IP адреса
-        self.local_ip = self.get_local_ip()
+        # Настройка сетки
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
         
-        # Создание UI
-        self.create_ui()
+        self.create_header()
+        self.create_main_content()
+        self.create_status_bar()
         
+        # Обработка закрытия
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+    
+    def create_header(self):
+        """Создать заголовок"""
+        self.header_frame = ctk.CTkFrame(self, fg_color="transparent", height=80)
+        self.header_frame.grid(row=0, column=0, sticky="ew", padx=30, pady=(20, 10))
+        self.header_frame.grid_columnconfigure(0, weight=1)
+        
+        # Логотип и название
+        self.title_frame = ctk.CTkFrame(self.header_frame, fg_color="transparent")
+        self.title_frame.grid(row=0, column=0, sticky="w")
+        
+        self.logo_label = ctk.CTkLabel(
+            self.title_frame,
+            text="📁",
+            font=ctk.CTkFont(size=32)
+        )
+        self.logo_label.grid(row=0, column=0, padx=(0, 15))
+        
+        self.title_label = ctk.CTkLabel(
+            self.title_frame,
+            text="Folder Share Pro",
+            font=ctk.CTkFont(size=24, weight="bold")
+        )
+        self.title_label.grid(row=0, column=1, sticky="w")
+        
+        self.subtitle_label = ctk.CTkLabel(
+            self.title_frame,
+            text="Обмен файлами в стиле Windows 11",
+            font=ctk.CTkFont(size=14),
+            text_color="gray"
+        )
+        self.subtitle_label.grid(row=1, column=1, sticky="w")
+        
+        # Индикатор статуса
+        self.status_indicator = ctk.CTkLabel(
+            self.header_frame,
+            text="● Не активно",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#95a5a6"
+        )
+        self.status_indicator.grid(row=0, column=1, padx=20)
+    
+    def create_main_content(self):
+        """Создать основной контент"""
+        self.main_frame = ctk.CTkFrame(self, corner_radius=15)
+        self.main_frame.grid(row=1, column=0, sticky="nsew", padx=30, pady=10)
+        self.main_frame.grid_columnconfigure(0, weight=1)
+        self.main_frame.grid_rowconfigure(0, weight=1)
+        
+        # Создание вкладок
+        self.tabview = ctk.CTkTabview(self.main_frame, corner_radius=15)
+        self.tabview.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        self.tabview.grid_columnconfigure(0, weight=1)
+        self.tabview.grid_rowconfigure(0, weight=1)
+        
+        # Вкладка сервера
+        self.server_tab = self.tabview.add("🖥️ Предоставить доступ")
+        self.setup_server_tab()
+        
+        # Вкладка клиента
+        self.client_tab = self.tabview.add("🌐 Удалённый доступ")
+        self.setup_client_tab()
+    
+    def setup_server_tab(self):
+        """Настроить вкладку сервера"""
+        self.server_tab.grid_columnconfigure(0, weight=1)
+        self.server_tab.grid_rowconfigure(0, weight=0)
+        self.server_tab.grid_rowconfigure(1, weight=1)
+        
+        # Панель управления
+        self.control_frame = ctk.CTkFrame(self.server_tab, fg_color="transparent")
+        self.control_frame.grid(row=0, column=0, sticky="ew", padx=30, pady=20)
+        self.control_frame.grid_columnconfigure(0, weight=1)
+        self.control_frame.grid_columnconfigure(1, weight=0)
+        
+        # Выбор папки
+        self.folder_frame = ctk.CTkFrame(self.control_frame, corner_radius=10)
+        self.folder_frame.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        self.folder_frame.grid_columnconfigure(1, weight=1)
+        
+        self.folder_label = ctk.CTkLabel(
+            self.folder_frame,
+            text="Папка не выбрана",
+            font=ctk.CTkFont(size=14),
+            anchor="w"
+        )
+        self.folder_label.grid(row=0, column=0, padx=15, pady=15, sticky="w")
+        
+        self.folder_path_label = ctk.CTkLabel(
+            self.folder_frame,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color="gray",
+            anchor="w"
+        )
+        self.folder_path_label.grid(row=1, column=0, columnspan=2, padx=15, pady=(0, 15), sticky="ew")
+        
+        self.select_btn = ctk.CTkButton(
+            self.folder_frame,
+            text="📂 Выбрать папку",
+            command=self.select_folder,
+            width=140,
+            height=36
+        )
+        self.select_btn.grid(row=0, column=1, padx=15, pady=15, sticky="e")
+        
+        # Кнопка запуска/остановки
+        self.server_btn = ctk.CTkButton(
+            self.control_frame,
+            text="▶ Запустить сервер",
+            command=self.toggle_server,
+            width=160,
+            height=40,
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        self.server_btn.grid(row=0, column=1, padx=10)
+        
+        # Информация о подключении
+        self.info_frame = ctk.CTkFrame(self.server_tab, corner_radius=10, fg_color="#2c3e50")
+        self.info_frame.grid(row=1, column=0, sticky="nsew", padx=30, pady=(0, 20))
+        self.info_frame.grid_columnconfigure(1, weight=1)
+        
+        ctk.CTkLabel(
+            self.info_frame,
+            text="📡 Ваш IP:",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="white"
+        ).grid(row=0, column=0, padx=20, pady=15, sticky="w")
+        
+        self.ip_label = ctk.CTkLabel(
+            self.info_frame,
+            text="Ожидание запуска...",
+            font=ctk.CTkFont(size=14, family="Consolas"),
+            text_color="#3498db"
+        )
+        self.ip_label.grid(row=0, column=1, padx=20, pady=15, sticky="w")
+        
+        ctk.CTkLabel(
+            self.info_frame,
+            text="🔗 URL для подключения:",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="white"
+        ).grid(row=1, column=0, padx=20, pady=15, sticky="w")
+        
+        self.url_label = ctk.CTkLabel(
+            self.info_frame,
+            text="—",
+            font=ctk.CTkFont(size=12, family="Consolas"),
+            text_color="#95a5a6"
+        )
+        self.url_label.grid(row=1, column=1, padx=20, pady=15, sticky="w")
+        
+        # Список файлов (предпросмотр)
+        self.preview_label = ctk.CTkLabel(
+            self.info_frame,
+            text="📄 Доступные файлы появятся после запуска",
+            font=ctk.CTkFont(size=13),
+            text_color="#7f8c8d"
+        )
+        self.preview_label.grid(row=2, column=0, columnspan=2, padx=20, pady=20)
+    
+    def setup_client_tab(self):
+        """Настроить вкладку клиента"""
+        self.client_tab.grid_columnconfigure(0, weight=1)
+        self.client_tab.grid_rowconfigure(0, weight=0)
+        self.client_tab.grid_rowconfigure(1, weight=1)
+        
+        # Панель подключения
+        self.connect_frame = ctk.CTkFrame(self.client_tab, fg_color="transparent")
+        self.connect_frame.grid(row=0, column=0, sticky="ew", padx=30, pady=20)
+        self.connect_frame.grid_columnconfigure(1, weight=1)
+        
+        ctk.CTkLabel(
+            self.connect_frame,
+            text="IP адрес хоста:",
+            font=ctk.CTkFont(size=14)
+        ).grid(row=0, column=0, padx=10, pady=15, sticky="e")
+        
+        self.ip_entry = ctk.CTkEntry(
+            self.connect_frame,
+            placeholder_text="192.168.1.100",
+            width=200,
+            height=36,
+            font=ctk.CTkFont(family="Consolas", size=14)
+        )
+        self.ip_entry.grid(row=0, column=1, padx=10, pady=15, sticky="w")
+        
+        self.port_entry = ctk.CTkEntry(
+            self.connect_frame,
+            placeholder_text="8000",
+            width=80,
+            height=36,
+            font=ctk.CTkFont(family="Consolas", size=14)
+        )
+        self.port_entry.insert(0, "8000")
+        self.port_entry.grid(row=0, column=2, padx=10, pady=15)
+        
+        self.connect_btn = ctk.CTkButton(
+            self.connect_frame,
+            text="🔗 Подключиться",
+            command=self.connect_to_host,
+            width=140,
+            height=36
+        )
+        self.connect_btn.grid(row=0, column=3, padx=10, pady=15)
+        
+        self.disconnect_btn = ctk.CTkButton(
+            self.connect_frame,
+            text="✕ Отключиться",
+            command=self.disconnect_from_host,
+            fg_color="#e74c3c",
+            hover_color="#c0392b",
+            width=140,
+            height=36,
+            state="disabled"
+        )
+        self.disconnect_btn.grid(row=0, column=4, padx=10, pady=15)
+        
+        # Навигационная панель
+        self.nav_frame = ctk.CTkFrame(self.client_tab, fg_color="transparent")
+        self.nav_frame.grid(row=1, column=0, sticky="ew", padx=30, pady=(0, 10))
+        
+        self.back_btn = ctk.CTkButton(
+            self.nav_frame,
+            text="⬅ Назад",
+            command=self.navigate_up,
+            width=100,
+            height=32,
+            state="disabled"
+        )
+        self.back_btn.pack(side="left", padx=5)
+        
+        self.path_label = ctk.CTkLabel(
+            self.nav_frame,
+            text="Не подключено",
+            font=ctk.CTkFont(size=14),
+            anchor="w"
+        )
+        self.path_label.pack(side="left", padx=20, fill="x", expand=True)
+        
+        self.refresh_btn = ctk.CTkButton(
+            self.nav_frame,
+            text="🔄 Обновить",
+            command=self.refresh_files,
+            width=100,
+            height=32,
+            state="disabled"
+        )
+        self.refresh_btn.pack(side="right", padx=5)
+        
+        # Список файлов
+        self.files_frame = ctk.CTkFrame(self.client_tab, corner_radius=10)
+        self.files_frame.grid(row=2, column=0, sticky="nsew", padx=30, pady=(0, 20))
+        self.files_frame.grid_columnconfigure(0, weight=1)
+        self.files_frame.grid_rowconfigure(0, weight=1)
+        
+        # Scrollable frame для файлов
+        self.scrollable_files = ctk.CTkScrollableFrame(
+            self.files_frame,
+            corner_radius=0,
+            fg_color="transparent"
+        )
+        self.scrollable_files.grid(row=0, column=0, sticky="nsew")
+        
+        self.file_widgets = []
+    
+    def create_status_bar(self):
+        """Создать строку состояния"""
+        self.status_frame = ctk.CTkFrame(self, fg_color="transparent", height=40)
+        self.status_frame.grid(row=2, column=0, sticky="ew", padx=30, pady=(0, 15))
+        self.status_frame.grid_columnconfigure(0, weight=1)
+        
+        self.status_label = ctk.CTkLabel(
+            self.status_frame,
+            text="Готов к работе",
+            font=ctk.CTkFont(size=13),
+            anchor="w"
+        )
+        self.status_label.grid(row=0, column=0, sticky="w")
+        
+        self.time_label = ctk.CTkLabel(
+            self.status_frame,
+            text=datetime.now().strftime("%H:%M:%S"),
+            font=ctk.CTkFont(size=13),
+            text_color="gray"
+        )
+        self.time_label.grid(row=0, column=1, sticky="e")
+        
+        self.update_time()
+    
+    def update_time(self):
+        """Обновить время"""
+        self.time_label.configure(text=datetime.now().strftime("%H:%M:%S"))
+        self.after(1000, self.update_time)
+    
+    def select_folder(self):
+        """Выбрать папку для доступа"""
+        folder = filedialog.askdirectory(title="Выберите папку для доступа")
+        if folder:
+            self.current_folder = folder
+            self.folder_path_label.configure(text=folder)
+            self.folder_label.configure(text="📁 Папка выбрана")
+            self.status_label.configure(text=f"Выбрана папка: {folder}")
+    
     def get_local_ip(self):
+        """Получить локальный IP адрес"""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
@@ -41,714 +494,727 @@ class FileShareApp:
         except:
             return "127.0.0.1"
     
-    def create_ui(self):
-        # Заголовок
-        header = ft.Container(
-            content=ft.Column([
-                ft.Text("Folder Share", size=28, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
-                ft.Text("Обмен файлами в стиле Windows 11", size=14, color=ft.colors.GREY_600),
-            ], spacing=5),
-            padding=ft.padding.only(bottom=20),
-        )
-        
-        # Карточки режимов
-        self.host_card = self.create_mode_card(
-            "Предоставить доступ",
-            "Откройте доступ к своей папке",
-            ft.icons.FOLDER_SHARED,
-            ft.colors.BLUE,
-            self.on_host_click
-        )
-        
-        self.client_card = self.create_mode_card(
-            "Подключиться",
-            "Получите доступ к удалённой папке",
-            ft.icons.FOLDER_OPEN,
-            ft.colors.GREEN,
-            self.on_client_click
-        )
-        
-        modes_row = ft.Row([
-            self.host_card,
-            self.client_card,
-        ], alignment=ft.MainAxisAlignment.SPACE_EVENLY, spacing=30)
-        
-        # Панель хостинга
-        self.host_panel = self.create_host_panel()
-        
-        # Панель клиента
-        self.client_panel = self.create_client_panel()
-        
-        # Основной контент
-        self.main_content = ft.Column([
-            header,
-            modes_row,
-            self.host_panel,
-            self.client_panel,
-        ], spacing=20, expand=True)
-        
-        self.page.add(self.main_content)
+    def toggle_server(self):
+        """Запустить/остановить сервер"""
+        if self.is_server_running:
+            self.stop_server()
+        else:
+            self.start_server()
     
-    def create_mode_card(self, title, subtitle, icon, color, on_click):
-        card = ft.Container(
-            content=ft.Column([
-                ft.Icon(icon, size=50, color=color),
-                ft.Text(title, size=18, weight=ft.FontWeight.BOLD),
-                ft.Text(subtitle, size=13, color=ft.colors.GREY_600, text_align=ft.TextAlign.CENTER),
-                ft.ElevatedButton(
-                    "Выбрать",
-                    icon=ft.icons.ARROW_FORWARD,
-                    on_click=on_click,
-                    style=ft.ButtonStyle(
-                        bgcolor=color,
-                        color=ft.colors.WHITE,
-                        shape=ft.RoundedRectangleBorder(radius=8),
-                    ),
-                ),
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=15),
-            width=300,
-            height=280,
-            padding=30,
-            border_radius=16,
-            bgcolor=ft.colors.WHITE,
-            shadow=ft.BoxShadow(
-                spread_radius=1,
-                blur_radius=10,
-                color=ft.colors.BLACK12,
-                offset=ft.Offset(0, 4),
-            ),
-            on_click=on_click,
-        )
-        return card
-    
-    def create_host_panel(self):
-        # Статус сервера
-        self.host_status = ft.Container(
-            content=ft.Row([
-                ft.Icon(ft.icons.CIRCLE, size=10, color=ft.colors.GREY),
-                ft.Text("Сервер не запущен", size=14),
-            ], spacing=10),
-            padding=15,
-            border_radius=8,
-            bgcolor=ft.colors.GREY_100,
-        )
-        
-        # Путь к папке
-        self.host_folder_path = ft.TextField(
-            label="Путь к папке",
-            hint_text="Выберите папку для общего доступа",
-            read_only=True,
-            expand=True,
-            border_radius=8,
-        )
-        
-        # Порт
-        self.host_port = ft.TextField(
-            label="Порт",
-            value="8000",
-            width=120,
-            border_radius=8,
-        )
-        
-        # Кнопки управления
-        self.host_btn_select = ft.ElevatedButton(
-            "Выбрать папку",
-            icon=ft.icons.FOLDER,
-            on_click=self.select_host_folder,
-            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
-        )
-        
-        self.host_btn_start = ft.ElevatedButton(
-            "Запустить сервер",
-            icon=ft.icons.PLAY_ARROW,
-            on_click=self.start_server,
-            disabled=True,
-            style=ft.ButtonStyle(
-                bgcolor=ft.colors.GREEN,
-                color=ft.colors.WHITE,
-                shape=ft.RoundedRectangleBorder(radius=8),
-            ),
-        )
-        
-        self.host_btn_stop = ft.ElevatedButton(
-            "Остановить сервер",
-            icon=ft.icons.STOP,
-            on_click=self.stop_server,
-            disabled=True,
-            style=ft.ButtonStyle(
-                bgcolor=ft.colors.RED,
-                color=ft.colors.WHITE,
-                shape=ft.RoundedRectangleBorder(radius=8),
-            ),
-        )
-        
-        # Информация для подключения
-        self.host_connection_info = ft.Container(
-            visible=False,
-            content=ft.Column([
-                ft.Divider(),
-                ft.Text("Данные для подключения:", weight=ft.FontWeight.BOLD),
-                ft.Text("IP адрес:", size=13),
-                ft.Container(
-                    content=ft.Text("", size=16, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
-                    padding=10,
-                    border_radius=6,
-                    bgcolor=ft.colors.BLUE_50,
-                ),
-                ft.Text("Порт:", size=13),
-                ft.Container(
-                    content=ft.Text("", size=16, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
-                    padding=10,
-                    border_radius=6,
-                    bgcolor=ft.colors.BLUE_50,
-                ),
-            ], spacing=8),
-            padding=15,
-            border_radius=8,
-            bgcolor=ft.colors.WHITE,
-            border=ft.border.all(1, ft.colors.BLUE_100),
-        )
-        
-        # Список файлов (превью)
-        self.host_file_list = ft.ListView(
-            expand=True,
-            spacing=5,
-            height=200,
-        )
-        
-        panel = ft.Container(
-            content=ft.Column([
-                ft.Text("Предоставление доступа", size=18, weight=ft.FontWeight.BOLD),
-                self.host_status,
-                ft.Row([self.host_folder_path, self.host_btn_select], spacing=10, expand=True),
-                ft.Row([self.host_port, self.host_btn_start, self.host_btn_stop], spacing=10),
-                self.host_connection_info,
-                ft.Text("Файлы в папке:", size=14, weight=ft.FontWeight.BOLD),
-                self.host_file_list,
-            ], spacing=15),
-            padding=25,
-            border_radius=16,
-            bgcolor=ft.colors.WHITE,
-            shadow=ft.BoxShadow(spread_radius=1, blur_radius=10, color=ft.colors.BLACK12, offset=ft.Offset(0, 4)),
-            visible=False,
-            expand=True,
-        )
-        
-        return panel
-    
-    def create_client_panel(self):
-        # Поля подключения
-        self.client_host = ft.TextField(
-            label="IP адрес хоста",
-            hint_text="192.168.x.x",
-            width=200,
-            border_radius=8,
-        )
-        
-        self.client_port = ft.TextField(
-            label="Порт",
-            value="8000",
-            width=120,
-            border_radius=8,
-        )
-        
-        self.client_btn_connect = ft.ElevatedButton(
-            "Подключиться",
-            icon=ft.icons.CONNECT_WITHOUT_CONTACT,
-            on_click=self.connect_to_host,
-            style=ft.ButtonStyle(
-                bgcolor=ft.colors.BLUE,
-                color=ft.colors.WHITE,
-                shape=ft.RoundedRectangleBorder(radius=8),
-            ),
-        )
-        
-        self.client_btn_disconnect = ft.ElevatedButton(
-            "Отключиться",
-            icon=ft.icons.DISCONNECT,
-            on_click=self.disconnect_from_host,
-            disabled=True,
-            style=ft.ButtonStyle(
-                bgcolor=ft.colors.RED,
-                color=ft.colors.WHITE,
-                shape=ft.RoundedRectangleBorder(radius=8),
-            ),
-        )
-        
-        # Статус подключения
-        self.client_status = ft.Container(
-            content=ft.Row([
-                ft.Icon(ft.icons.CIRCLE, size=10, color=ft.colors.GREY),
-                ft.Text("Не подключено", size=14),
-            ], spacing=10),
-            padding=15,
-            border_radius=8,
-            bgcolor=ft.colors.GREY_100,
-        )
-        
-        # Навигация по пути
-        self.client_path_display = ft.TextField(
-            label="Текущий путь",
-            read_only=True,
-            expand=True,
-            border_radius=8,
-        )
-        
-        self.client_btn_up = ft.IconButton(
-            ft.icons.ARROW_UPWARD,
-            tooltip="Наверх",
-            on_click=self.navigate_up,
-            disabled=True,
-        )
-        
-        self.client_btn_refresh = ft.IconButton(
-            ft.icons.REFRESH,
-            tooltip="Обновить",
-            on_click=self.refresh_files,
-            disabled=True,
-        )
-        
-        # Список файлов
-        self.client_file_list = ft.ListView(
-            expand=True,
-            spacing=5,
-        )
-        
-        # Редактор файлов
-        self.editor_dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Редактирование файла"),
-            content=ft.Column([
-                ft.Text("", size=12, color=ft.colors.GREY_600),
-                ft.TextField(
-                    multiline=True,
-                    min_lines=15,
-                    max_lines=25,
-                    expand=True,
-                    border_radius=8,
-                ),
-            ], tight=True, expand=True),
-            actions=[
-                ft.TextButton("Отмена", on_click=self.close_editor),
-                ft.TextButton("Сохранить", on_click=self.save_file, style=ft.ButtonStyle(bgcolor=ft.colors.BLUE, color=ft.colors.WHITE)),
-            ],
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
-        
-        panel = ft.Container(
-            content=ft.Column([
-                ft.Text("Удалённый доступ", size=18, weight=ft.FontWeight.BOLD),
-                self.client_status,
-                ft.Row([
-                    self.client_host,
-                    self.client_port,
-                    self.client_btn_connect,
-                    self.client_btn_disconnect,
-                ], spacing=10),
-                ft.Row([
-                    self.client_btn_up,
-                    self.client_btn_refresh,
-                    self.client_path_display,
-                ], spacing=10, expand=True),
-                self.client_file_list,
-            ], spacing=15),
-            padding=25,
-            border_radius=16,
-            bgcolor=ft.colors.WHITE,
-            shadow=ft.BoxShadow(spread_radius=1, blur_radius=10, color=ft.colors.BLACK12, offset=ft.Offset(0, 4)),
-            visible=False,
-            expand=True,
-        )
-        
-        return panel
-    
-    def on_host_click(self, e):
-        self.host_panel.visible = True
-        self.client_panel.visible = False
-        self.page.update()
-    
-    def on_client_click(self, e):
-        self.client_panel.visible = True
-        self.host_panel.visible = False
-        self.page.update()
-    
-    def select_host_folder(self, e):
-        # В реальном приложении здесь был бы диалог выбора папки
-        # Для демонстрации используем домашнюю директорию
-        home = str(Path.home())
-        self.host_folder_path.value = home
-        self.current_folder = home
-        self.host_btn_start.disabled = False
-        self.update_host_file_list()
-        self.page.update()
-    
-    def update_host_file_list(self):
-        self.host_file_list.controls.clear()
+    def start_server(self):
+        """Запустить сервер"""
         if not self.current_folder:
+            messagebox.showwarning("Предупреждение", "Сначала выберите папку!")
             return
         
         try:
-            items = sorted(os.listdir(self.current_folder))
-            for item in items[:20]:  # Показываем первые 20
-                is_dir = os.path.isdir(os.path.join(self.current_folder, item))
-                icon = ft.icons.FOLDER if is_dir else ft.icons.INSERT_DRIVE_FILE
-                color = ft.colors.AMBER if is_dir else ft.colors.BLUE_700
-                self.host_file_list.controls.append(
-                    ft.ListTile(
-                        leading=ft.Icon(icon, color=color),
-                        title=ft.Text(item, size=13),
-                        dense=True,
-                    )
-                )
-        except Exception as ex:
-            self.host_file_list.controls.append(
-                ft.ListTile(title=ft.Text(f"Ошибка: {str(ex)}", color=ft.colors.RED))
-            )
-    
-    def start_server(self, e):
-        if not self.current_folder:
-            return
-        
-        port = int(self.host_port.value)
-        
-        class CustomHandler(http.server.SimpleHTTPRequestHandler):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, directory=self.current_folder, **kwargs)
+            port = 8000
+            self.httpd = socketserver.TCPServer(("", port), self.create_handler())
             
-            def do_GET(self):
-                if self.path.startswith('/api/files'):
-                    self.send_json_response(self.list_files())
-                elif self.path.startswith('/api/file?'):
-                    path = self.path.split('path=')[1] if 'path=' in self.path else ''
-                    self.serve_file(path)
-                elif self.path.startswith('/api/save'):
-                    self.save_file_handler()
-                else:
-                    super().do_GET()
-            
-            def do_POST(self):
-                if self.path.startswith('/api/save'):
-                    self.save_file_handler()
-                else:
-                    super().do_POST()
-            
-            def list_files(self):
-                path = self.path.split('path=')[1] if 'path=' in self.path else ''
-                full_path = os.path.join(self.current_folder, path) if path else self.current_folder
-                try:
-                    items = []
-                    for item in sorted(os.listdir(full_path)):
-                        item_path = os.path.join(full_path, item)
-                        items.append({
-                            'name': item,
-                            'is_dir': os.path.isdir(item_path),
-                            'size': os.path.getsize(item_path) if os.path.isfile(item_path) else 0,
-                        })
-                    return {'success': True, 'files': items, 'path': full_path}
-                except Exception as ex:
-                    return {'success': False, 'error': str(ex)}
-            
-            def serve_file(self, path):
-                import urllib.parse
-                path = urllib.parse.unquote(path)
-                full_path = os.path.join(self.current_folder, path)
-                if os.path.exists(full_path) and os.path.isfile(full_path):
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/octet-stream')
-                    self.send_header('Content-Disposition', f'attachment; filename="{os.path.basename(full_path)}"')
-                    self.end_headers()
-                    with open(full_path, 'rb') as f:
-                        self.wfile.write(f.read())
-                else:
-                    self.send_error(404)
-            
-            def save_file_handler(self):
-                content_length = int(self.headers['Content-Length'])
-                post_data = self.rfile.read(content_length)
-                data = json.loads(post_data.decode('utf-8'))
-                
-                file_path = data.get('path', '')
-                content = data.get('content', '')
-                
-                full_path = os.path.join(self.current_folder, file_path)
-                try:
-                    with open(full_path, 'w', encoding='utf-8') as f:
-                        f.write(content)
-                    self.send_json_response({'success': True})
-                except Exception as ex:
-                    self.send_json_response({'success': False, 'error': str(ex)})
-            
-            def send_json_response(self, data):
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps(data).encode('utf-8'))
-        
-        try:
-            self.server = socketserver.TCPServer(("", port), CustomHandler)
-            self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            self.is_server_running = True
+            self.server_thread = threading.Thread(target=self.run_server, daemon=True)
             self.server_thread.start()
             
-            self.is_hosting = True
-            self.host_status.content = ft.Row([
-                ft.Icon(ft.icons.CIRCLE, size=10, color=ft.colors.GREEN),
-                ft.Text("Сервер запущен", size=14, color=ft.colors.GREEN_700),
-            ], spacing=10)
+            # Обновление UI
+            ip = self.get_local_ip()
+            self.ip_label.configure(text=f"{ip}:{port}", text_color="#2ecc71")
+            self.url_label.configure(text=f"http://{ip}:{port}", text_color="#3498db")
             
-            self.host_btn_start.disabled = True
-            self.host_btn_stop.disabled = False
-            self.host_port.disabled = True
+            self.server_btn.configure(
+                text="⏹ Остановить сервер",
+                fg_color="#e74c3c",
+                hover_color="#c0392b"
+            )
             
-            # Показать информацию для подключения
-            self.host_connection_info.content.controls[2].value = f"{self.local_ip}"
-            self.host_connection_info.content.controls[4].value = f"{port}"
-            self.host_connection_info.visible = True
+            self.status_indicator.configure(
+                text="● Сервер запущен",
+                text_color="#2ecc71"
+            )
             
-            self.page.update()
+            self.status_label.configure(text=f"Сервер запущен на {ip}:{port}")
             
-        except Exception as ex:
-            ft.alert(self.page, f"Ошибка запуска сервера: {str(ex)}")
+            # Показать предпросмотр файлов
+            self.show_preview()
+            
+        except OSError as e:
+            messagebox.showerror("Ошибка", f"Не удалось запустить сервер:\n{str(e)}")
+            self.status_label.configure(text="Ошибка запуска сервера")
     
-    def stop_server(self, e):
-        if self.server:
-            self.server.shutdown()
-            self.server = None
-            self.server_thread = None
+    def create_handler(self):
+        """Создать обработчик HTTP запросов"""
+        app = self
         
-        self.is_hosting = False
-        self.host_status.content = ft.Row([
-            ft.Icon(ft.icons.CIRCLE, size=10, color=ft.colors.GREY),
-            ft.Text("Сервер остановлен", size=14),
-        ], spacing=10)
+        class CustomHandler(http.server.SimpleHTTPRequestHandler):
+            def do_GET(self):
+                parsed_path = urllib.parse.unquote(self.path)
+                
+                if parsed_path == "/":
+                    self.send_file_list()
+                elif parsed_path.startswith("/download/"):
+                    filepath = os.path.join(app.current_folder, parsed_path[10:])
+                    if os.path.exists(filepath) and os.path.isfile(filepath):
+                        self.send_file(filepath)
+                    else:
+                        self.send_error(404, "File not found")
+                elif parsed_path.startswith("/edit/"):
+                    filepath = os.path.join(app.current_folder, parsed_path[6:])
+                    if os.path.exists(filepath) and os.path.isfile(filepath):
+                        self.serve_editor(filepath, parsed_path[6:])
+                    else:
+                        self.send_error(404, "File not found")
+                else:
+                    self.send_error(404, "Not found")
+            
+            def do_POST(self):
+                if self.path.startswith("/save/"):
+                    filepath = os.path.join(app.current_folder, self.path[6:])
+                    content_length = int(self.headers['Content-Length'])
+                    post_data = self.rfile.read(content_length).decode('utf-8')
+                    
+                    try:
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            f.write(post_data)
+                        self.send_response(200)
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(b'{"status": "success"}')
+                    except Exception as e:
+                        self.send_response(500)
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode())
+                else:
+                    self.send_error(404, "Not found")
+            
+            def send_file_list(self):
+                files = []
+                try:
+                    for item in os.listdir(app.current_folder):
+                        item_path = os.path.join(app.current_folder, item)
+                        is_dir = os.path.isdir(item_path)
+                        size = "—" if is_dir else self.format_size(os.path.getsize(item_path))
+                        modified = datetime.fromtimestamp(os.path.getmtime(item_path)).strftime("%Y-%m-%d %H:%M")
+                        
+                        files.append({
+                            "name": item,
+                            "type": "folder" if is_dir else "file",
+                            "size": size,
+                            "modified": modified,
+                            "icon": "📁" if is_dir else self.get_file_icon(item)
+                        })
+                except Exception as e:
+                    pass
+                
+                html = self.generate_html(files, "/")
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(html.encode('utf-8'))
+            
+            def send_file(self, filepath):
+                with open(filepath, 'rb') as f:
+                    content = f.read()
+                self.send_response(200)
+                self.send_header('Content-type', 'application/octet-stream')
+                self.send_header('Content-Disposition', f'attachment; filename="{os.path.basename(filepath)}"')
+                self.send_header('Content-Length', len(content))
+                self.end_headers()
+                self.wfile.write(content)
+            
+            def serve_editor(self, filepath, relative_path):
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                except:
+                    content = ""
+                
+                html = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Редактор: {os.path.basename(filepath)}</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        .container {{ 
+            max-width: 1200px; 
+            margin: 0 auto; 
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }}
+        .header {{ 
+            background: #2c3e50;
+            color: white;
+            padding: 20px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        .header h1 {{ font-size: 20px; }}
+        .btn {{ 
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s;
+        }}
+        .btn-save {{ background: #27ae60; color: white; }}
+        .btn-save:hover {{ background: #219a52; }}
+        .btn-back {{ background: #3498db; color: white; }}
+        .btn-back:hover {{ background: #2980b9; }}
+        .editor {{ 
+            width: 100%;
+            height: 500px;
+            border: none;
+            padding: 20px;
+            font-family: 'Consolas', monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            resize: none;
+        }}
+        .editor:focus {{ outline: none; }}
+        .footer {{ 
+            background: #ecf0f1;
+            padding: 15px 30px;
+            text-align: center;
+            color: #7f8c8d;
+        }}
+        .status {{ 
+            padding: 10px 30px;
+            background: #f8f9fa;
+            border-top: 1px solid #dee2e6;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📝 Редактор: {os.path.basename(filepath)}</h1>
+            <div>
+                <button class="btn btn-back" onclick="window.location.href='/'">← Назад</button>
+                <button class="btn btn-save" onclick="saveFile()">💾 Сохранить</button>
+            </div>
+        </div>
+        <textarea class="editor" id="editor">{self.escape_html(content)}</textarea>
+        <div class="status" id="status">Готов к редактированию</div>
+        <div class="footer">
+            Файл: {relative_path} | Изменения сохраняются на сервере
+        </div>
+    </div>
+    <script>
+        function saveFile() {{
+            const editor = document.getElementById('editor');
+            const status = document.getElementById('status');
+            const content = editor.value;
+            
+            status.textContent = 'Сохранение...';
+            
+            fetch('/save/{relative_path}', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'text/plain' }},
+                body: content
+            }})
+            .then(response => response.json())
+            .then(data => {{
+                if (data.status === 'success') {{
+                    status.textContent = '✓ Файл успешно сохранён!';
+                    status.style.color = '#27ae60';
+                }} else {{
+                    status.textContent = '✕ Ошибка: ' + data.message;
+                    status.style.color = '#e74c3c';
+                }}
+            }})
+            .catch(err => {{
+                status.textContent = '✕ Ошибка соединения';
+                status.style.color = '#e74c3c';
+            }});
+        }}
+    </script>
+</body>
+</html>"""
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(html.encode('utf-8'))
+            
+            def generate_html(self, files, path):
+                rows = ""
+                for f in sorted(files, key=lambda x: (x['type'] != 'folder', x['name'])):
+                    action = f"/download/{path}{f['name']}" if f['type'] == 'file' else "#"
+                    edit_btn = ""
+                    if f['type'] == 'file' and self.is_text_file(f['name']):
+                        edit_btn = f'<a href="/edit/{path}{f["name"]}" class="action-btn edit">✏️</a>'
+                    
+                    rows += f"""
+                    <tr>
+                        <td><span class="icon">{f['icon']}</span></td>
+                        <td class="name"><a href="{action}" class="file-link">{f['name']}</a></td>
+                        <td class="type">{f['type'].upper()}</td>
+                        <td class="size">{f['size']}</td>
+                        <td class="modified">{f['modified']}</td>
+                        <td class="actions">
+                            {edit_btn}
+                            {'<a href="' + action + '" class="action-btn download">⬇</a>' if f['type'] == 'file' else ''}
+                        </td>
+                    </tr>"""
+                
+                return f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Folder Share - {app.current_folder}</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        .container {{ 
+            max-width: 1400px; 
+            margin: 0 auto; 
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }}
+        .header {{ 
+            background: #2c3e50;
+            color: white;
+            padding: 25px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        .header h1 {{ font-size: 24px; }}
+        .path {{ color: #95a5a6; font-size: 14px; margin-top: 5px; }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th {{ 
+            background: #34495e; 
+            color: white; 
+            padding: 15px; 
+            text-align: left;
+            font-weight: 600;
+        }}
+        td {{ 
+            padding: 15px; 
+            border-bottom: 1px solid #ecf0f1;
+        }}
+        tr:hover {{ background: #f8f9fa; }}
+        .icon {{ font-size: 20px; }}
+        .file-link {{ 
+            color: #2c3e50; 
+            text-decoration: none;
+            font-weight: 500;
+        }}
+        .file-link:hover {{ color: #3498db; text-decoration: underline; }}
+        .type {{ 
+            background: #3498db; 
+            color: white; 
+            padding: 4px 10px; 
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+        }}
+        .size {{ color: #7f8c8d; }}
+        .modified {{ color: #95a5a6; font-size: 13px; }}
+        .actions {{ display: flex; gap: 8px; }}
+        .action-btn {{ 
+            padding: 6px 12px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 14px;
+            transition: all 0.3s;
+        }}
+        .download {{ background: #27ae60; color: white; }}
+        .download:hover {{ background: #219a52; }}
+        .edit {{ background: #f39c12; color: white; }}
+        .edit:hover {{ background: #d68910; }}
+        .footer {{ 
+            background: #ecf0f1;
+            padding: 20px 30px;
+            text-align: center;
+            color: #7f8c8d;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>📁 Folder Share</h1>
+                <div class="path">{app.current_folder}</div>
+            </div>
+            <div style="color: #95a5a6;">Сервер активен</div>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 50px;"></th>
+                    <th>Имя</th>
+                    <th style="width: 100px;">Тип</th>
+                    <th style="width: 100px;">Размер</th>
+                    <th style="width: 180px;">Изменён</th>
+                    <th style="width: 120px;">Действия</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows}
+            </tbody>
+        </table>
+        <div class="footer">
+            Folder Share Pro • Для редактирования нажмите ✏️ рядом с файлом
+        </div>
+    </div>
+</body>
+</html>"""
+            
+            def is_text_file(self, filename):
+                text_extensions = ['.txt', '.py', '.js', '.html', '.css', '.json', '.xml', '.md', '.csv', '.log', '.ini', '.cfg']
+                return any(filename.lower().endswith(ext) for ext in text_extensions)
+            
+            def get_file_icon(self, filename):
+                ext_map = {
+                    '.pdf': '📕', '.doc': '📘', '.docx': '📘',
+                    '.xls': '📗', '.xlsx': '📗', '.csv': '📊',
+                    '.jpg': '🖼️', '.jpeg': '🖼️', '.png': '🖼️', '.gif': '🖼️',
+                    '.mp3': '🎵', '.wav': '🎵', '.mp4': '🎬', '.avi': '🎬',
+                    '.zip': '📦', '.rar': '📦', '.7z': '📦',
+                    '.py': '🐍', '.js': '📜', '.html': '🌐', '.css': '🎨'
+                }
+                for ext, icon in ext_map.items():
+                    if filename.lower().endswith(ext):
+                        return icon
+                return '📄'
+            
+            def format_size(self, size):
+                for unit in ['B', 'KB', 'MB', 'GB']:
+                    if size < 1024:
+                        return f"{size:.1f} {unit}"
+                    size /= 1024
+                return f"{size:.1f} TB"
+            
+            def escape_html(self, text):
+                return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
         
-        self.host_btn_start.disabled = False
-        self.host_btn_stop.disabled = True
-        self.host_port.disabled = False
-        self.host_connection_info.visible = False
-        
-        self.page.update()
+        return CustomHandler
     
-    def connect_to_host(self, e):
-        host = self.client_host.value.strip()
-        port = self.client_port.value.strip()
+    def run_server(self):
+        """Запуск сервера в отдельном потоке"""
+        self.httpd.serve_forever()
+    
+    def stop_server(self):
+        """Остановить сервер"""
+        if self.httpd:
+            self.httpd.shutdown()
+            self.httpd = None
         
-        if not host or not port:
-            ft.alert(self.page, "Введите IP адрес и порт")
+        self.is_server_running = False
+        
+        # Обновление UI
+        self.ip_label.configure(text="Ожидание запуска...", text_color="#95a5a6")
+        self.url_label.configure(text="—", text_color="#95a5a6")
+        self.preview_label.configure(text="📄 Доступные файлы появятся после запуска")
+        
+        self.server_btn.configure(
+            text="▶ Запустить сервер",
+            fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"]
+        )
+        
+        self.status_indicator.configure(
+            text="● Не активно",
+            text_color="#95a5a6"
+        )
+        
+        self.status_label.configure(text="Сервер остановлен")
+        self.folder_path_label.configure(text="")
+        self.folder_label.configure(text="Папка не выбрана")
+        self.current_folder = None
+    
+    def show_preview(self):
+        """Показать предпросмотр файлов"""
+        if self.current_folder:
+            try:
+                items = os.listdir(self.current_folder)
+                count = len(items)
+                self.preview_label.configure(
+                    text=f"📄 Доступно файлов и папок: {count}"
+                )
+            except:
+                self.preview_label.configure(
+                    text="📄 Ошибка чтения папки"
+                )
+    
+    def connect_to_host(self):
+        """Подключиться к удалённому хосту"""
+        ip = self.ip_entry.get().strip()
+        port = self.port_entry.get().strip()
+        
+        if not ip:
+            messagebox.showwarning("Предупреждение", "Введите IP адрес!")
             return
         
         try:
-            # Проверка подключения
-            import urllib.request
-            url = f"http://{host}:{port}/api/files"
-            response = urllib.request.urlopen(url, timeout=5)
-            data = json.loads(response.read().decode('utf-8'))
+            port_num = int(port)
+        except:
+            messagebox.showwarning("Предупреждение", "Некорректный порт!")
+            return
+        
+        # Проверка подключения
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((ip, port_num))
+            sock.close()
             
-            if data.get('success'):
-                self.connected_host = f"{host}:{port}"
-                self.current_files = data.get('files', [])
-                
-                self.client_status.content = ft.Row([
-                    ft.Icon(ft.icons.CIRCLE, size=10, color=ft.colors.GREEN),
-                    ft.Text(f"Подключено к {host}:{port}", size=14, color=ft.colors.GREEN_700),
-                ], spacing=10)
-                
-                self.client_btn_connect.disabled = True
-                self.client_btn_disconnect.disabled = False
-                self.client_btn_refresh.disabled = False
-                self.client_btn_up.disabled = False
-                
-                self.client_path_display.value = data.get('path', '')
-                self.update_client_file_list(data.get('files', []), data.get('path', ''))
-                
-                self.page.update()
-            else:
-                ft.alert(self.page, f"Ошибка: {data.get('error', 'Неизвестная ошибка')}")
-                
-        except Exception as ex:
-            ft.alert(self.page, f"Не удалось подключиться: {str(ex)}")
+            if result != 0:
+                raise Exception("Не удалось подключиться")
+            
+            self.connected_host = f"{ip}:{port_num}"
+            self.current_path = "/"
+            
+            # Обновление UI
+            self.connect_btn.configure(state="disabled")
+            self.disconnect_btn.configure(state="normal")
+            self.back_btn.configure(state="disabled")
+            self.refresh_btn.configure(state="normal")
+            
+            self.path_label.configure(text=f"Подключено к {self.connected_host}")
+            self.status_label.configure(text=f"Подключено к {self.connected_host}")
+            
+            # Загрузка списка файлов
+            self.load_remote_files()
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось подключиться:\n{str(e)}")
+            self.status_label.configure(text="Ошибка подключения")
     
-    def disconnect_from_host(self, e):
+    def disconnect_from_host(self):
+        """Отключиться от хоста"""
         self.connected_host = None
-        self.current_files = []
+        self.current_path = None
         
-        self.client_status.content = ft.Row([
-            ft.Icon(ft.icons.CIRCLE, size=10, color=ft.colors.GREY),
-            ft.Text("Отключено", size=14),
-        ], spacing=10)
+        # Очистка UI
+        self.connect_btn.configure(state="normal")
+        self.disconnect_btn.configure(state="disabled")
+        self.back_btn.configure(state="disabled")
+        self.refresh_btn.configure(state="disabled")
         
-        self.client_btn_connect.disabled = False
-        self.client_btn_disconnect.disabled = True
-        self.client_btn_refresh.disabled = True
-        self.client_btn_up.disabled = True
-        self.client_file_list.controls.clear()
-        self.client_path_display.value = ""
+        self.path_label.configure(text="Не подключено")
+        self.status_label.configure(text="Отключено")
         
-        self.page.update()
+        # Очистка списка файлов
+        for widget in self.file_widgets:
+            widget.destroy()
+        self.file_widgets = []
     
-    def navigate_up(self, e):
-        if not self.connected_host:
-            return
-        
-        current_path = self.client_path_display.value
-        parent_path = str(Path(current_path).parent)
-        
-        try:
-            import urllib.request
-            host, port = self.connected_host.split(':')
-            url = f"http://{host}:{port}/api/files?path={urllib.parse.quote(parent_path)}"
-            response = urllib.request.urlopen(url, timeout=5)
-            data = json.loads(response.read().decode('utf-8'))
-            
-            if data.get('success'):
-                self.current_files = data.get('files', [])
-                self.client_path_display.value = data.get('path', '')
-                self.update_client_file_list(data.get('files', []), data.get('path', ''))
-                self.page.update()
-        except Exception as ex:
-            ft.alert(self.page, f"Ошибка навигации: {str(ex)}")
-    
-    def refresh_files(self, e):
+    def load_remote_files(self):
+        """Загрузить список файлов с удалённого хоста"""
         if not self.connected_host:
             return
         
         try:
             import urllib.request
-            import urllib.parse
-            host, port = self.connected_host.split(':')
-            current_path = self.client_path_display.value
-            url = f"http://{host}:{port}/api/files?path={urllib.parse.quote(current_path)}"
-            response = urllib.request.urlopen(url, timeout=5)
-            data = json.loads(response.read().decode('utf-8'))
             
-            if data.get('success'):
-                self.current_files = data.get('files', [])
-                self.update_client_file_list(data.get('files', []), data.get('path', ''))
-                self.page.update()
-        except Exception as ex:
-            ft.alert(self.page, f"Ошибка обновления: {str(ex)}")
+            url = f"http://{self.connected_host}/"
+            with urllib.request.urlopen(url, timeout=5) as response:
+                html = response.read().decode('utf-8')
+            
+            # Парсинг HTML (упрощённый)
+            self.display_remote_files(html)
+            
+            self.status_label.configure(text="Файлы загружены")
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось загрузить файлы:\n{str(e)}")
+            self.status_label.configure(text="Ошибка загрузки файлов")
     
-    def update_client_file_list(self, files, path):
-        self.client_file_list.controls.clear()
+    def display_remote_files(self, html):
+        """Отобразить список файлов"""
+        # Очистка предыдущих виджетов
+        for widget in self.file_widgets:
+            widget.destroy()
+        self.file_widgets = []
         
-        for file_info in files:
-            name = file_info['name']
-            is_dir = file_info['is_dir']
-            size = file_info.get('size', 0)
-            
-            icon = ft.icons.FOLDER if is_dir else ft.icons.INSERT_DRIVE_FILE
-            color = ft.colors.AMBER if is_dir else ft.colors.BLUE_700
-            
-            tile = ft.ListTile(
-                leading=ft.Icon(icon, color=color),
-                title=ft.Text(name, size=13),
-                subtitle=ft.Text(f"{size} байт" if not is_dir else "Папка", size=11, color=ft.colors.GREY_600),
-                trailing=ft.Row([
-                    ft.IconButton(
-                        ft.icons.DOWNLOAD,
-                        tooltip="Скачать",
-                        on_click=lambda e, n=name: self.download_file(n),
-                        disabled=is_dir,
-                        icon_size=18,
-                    ),
-                    ft.IconButton(
-                        ft.icons.EDIT,
-                        tooltip="Редактировать",
-                        on_click=lambda e, n=name: self.open_editor(n),
-                        disabled=is_dir,
-                        icon_size=18,
-                    ),
-                ]) if not is_dir else None,
-                dense=True,
+        # Простой парсинг для демонстрации
+        # В реальном приложении нужно использовать proper HTML parser
+        import re
+        
+        # Извлекаем имена файлов из HTML
+        pattern = r'<td class="name"><a href="[^"]*" class="file-link">([^<]+)</a></td>'
+        matches = re.findall(pattern, html)
+        
+        if not matches:
+            no_files_label = ctk.CTkLabel(
+                self.scrollable_files,
+                text="Нет файлов или ошибка парсинга",
+                font=ctk.CTkFont(size=14),
+                text_color="gray"
             )
-            self.client_file_list.controls.append(tile)
-    
-    def download_file(self, filename):
-        if not self.connected_host:
+            no_files_label.grid(row=0, column=0, pady=20)
+            self.file_widgets.append(no_files_label)
             return
         
-        try:
-            import urllib.request
-            import urllib.parse
-            host, port = self.connected_host.split(':')
-            current_path = self.client_path_display.value
-            full_path = os.path.join(current_path, filename)
-            url = f"http://{host}:{port}/api/file?path={urllib.parse.quote(full_path)}"
+        for i, filename in enumerate(matches):
+            row_frame = ctk.CTkFrame(self.scrollable_files, corner_radius=8)
+            row_frame.grid(row=i, column=0, sticky="ew", padx=10, pady=5)
+            row_frame.grid_columnconfigure(0, weight=1)
             
-            # Сохранение файла
-            save_path = os.path.join(str(Path.home()), 'Downloads', filename)
-            urllib.request.urlretrieve(url, save_path)
+            # Иконка
+            icon = "📁" if filename.endswith('/') else "📄"
+            icon_label = ctk.CTkLabel(row_frame, text=icon, font=ctk.CTkFont(size=18))
+            icon_label.grid(row=0, column=0, padx=10, pady=10)
             
-            ft.alert(self.page, f"Файл сохранён: {save_path}")
-        except Exception as ex:
-            ft.alert(self.page, f"Ошибка скачивания: {str(ex)}")
-    
-    def open_editor(self, filename):
-        if not self.connected_host:
-            return
-        
-        try:
-            import urllib.request
-            import urllib.parse
-            host, port = self.connected_host.split(':')
-            current_path = self.client_path_display.value
-            full_path = os.path.join(current_path, filename)
-            
-            # Чтение содержимого файла
-            url = f"http://{host}:{port}/api/file?path={urllib.parse.quote(full_path)}"
-            response = urllib.request.urlopen(url, timeout=5)
-            content = response.read().decode('utf-8')
-            
-            # Настройка редактора
-            self.editor_dialog.title = ft.Text(f"Редактирование: {filename}")
-            self.editor_dialog.content.controls[0].value = full_path
-            self.editor_dialog.content.controls[1].value = content
-            
-            self.page.dialog = self.editor_dialog
-            self.editor_dialog.open = True
-            self.page.update()
-            
-        except Exception as ex:
-            ft.alert(self.page, f"Ошибка открытия файла: {str(ex)}")
-    
-    def close_editor(self, e):
-        self.editor_dialog.open = False
-        self.page.update()
-    
-    def save_file(self, e):
-        if not self.connected_host:
-            return
-        
-        try:
-            import urllib.request
-            import json
-            
-            host, port = self.connected_host.split(':')
-            file_path = self.editor_dialog.content.controls[0].value
-            content = self.editor_dialog.content.controls[1].value
-            
-            # Отправка данных на сервер
-            data = json.dumps({'path': file_path, 'content': content}).encode('utf-8')
-            req = urllib.request.Request(
-                f"http://{host}:{port}/api/save",
-                data=data,
-                headers={'Content-Type': 'application/json'},
-                method='POST'
+            # Имя файла
+            name_label = ctk.CTkLabel(
+                row_frame,
+                text=filename,
+                font=ctk.CTkFont(size=13),
+                anchor="w"
             )
-            response = urllib.request.urlopen(req, timeout=5)
-            result = json.loads(response.read().decode('utf-8'))
+            name_label.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
             
-            if result.get('success'):
-                ft.alert(self.page, "Файл успешно сохранён!")
-                self.close_editor(e)
-                self.refresh_files(e)
-            else:
-                ft.alert(self.page, f"Ошибка сохранения: {result.get('error', 'Неизвестная ошибка')}")
+            # Кнопки действий
+            btn_frame = ctk.CTkFrame(row_frame, fg_color="transparent")
+            btn_frame.grid(row=0, column=2, padx=10, pady=10)
+            
+            # Кнопка просмотра/скачивания
+            view_btn = ctk.CTkButton(
+                btn_frame,
+                text="👁 Просмотр",
+                width=100,
+                height=28,
+                font=ctk.CTkFont(size=12),
+                command=lambda f=filename: self.view_remote_file(f)
+            )
+            view_btn.grid(row=0, column=0, padx=5)
+            
+            # Кнопка редактирования для текстовых файлов
+            if self.is_text_filename(filename):
+                edit_btn = ctk.CTkButton(
+                    btn_frame,
+                    text="✏️ Редактировать",
+                    width=110,
+                    height=28,
+                    font=ctk.CTkFont(size=12),
+                    fg_color="#f39c12",
+                    hover_color="#d68910",
+                    command=lambda f=filename: self.edit_remote_file(f)
+                )
+                edit_btn.grid(row=0, column=1, padx=5)
+            
+            self.file_widgets.append(row_frame)
+    
+    def is_text_filename(self, filename):
+        """Проверить, является ли файл текстовым"""
+        text_extensions = ['.txt', '.py', '.js', '.html', '.css', '.json', '.xml', '.md', '.csv', '.log', '.ini', '.cfg']
+        return any(filename.lower().endswith(ext) for ext in text_extensions)
+    
+    def view_remote_file(self, filename):
+        """Просмотреть удалённый файл"""
+        try:
+            import urllib.request
+            
+            url = f"http://{self.connected_host}/download/{filename}"
+            with urllib.request.urlopen(url, timeout=10) as response:
+                content = response.read().decode('utf-8')
+            
+            # Показываем в диалоге
+            preview_window = ctk.CTkToplevel(self)
+            preview_window.title(f"Просмотр: {filename}")
+            preview_window.geometry("700x500")
+            
+            textbox = ctk.CTkTextbox(preview_window, font=ctk.CTkFont(family="Consolas", size=13))
+            textbox.pack(fill="both", expand=True, padx=20, pady=20)
+            textbox.insert("0.0", content)
+            textbox.configure(state="disabled")
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось просмотреть файл:\n{str(e)}")
+    
+    def edit_remote_file(self, filename):
+        """Редактировать удалённый файл"""
+        try:
+            import urllib.request
+            
+            # Скачиваем содержимое
+            url = f"http://{self.connected_host}/download/{filename}"
+            with urllib.request.urlopen(url, timeout=10) as response:
+                content = response.read().decode('utf-8')
+            
+            # Создаём временный файл
+            temp_path = os.path.join(os.getcwd(), f"temp_edit_{hashlib.md5(filename.encode()).hexdigest()}.tmp")
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            # Открываем редактор
+            def save_callback(saved_path):
+                # Загружаем изменённое содержимое
+                with open(saved_path, 'r', encoding='utf-8') as f:
+                    new_content = f.read()
                 
-        except Exception as ex:
-            ft.alert(self.page, f"Ошибка сохранения: {str(ex)}")
+                # Отправляем обратно на сервер
+                try:
+                    encoded_filename = urllib.parse.quote(filename)
+                    save_url = f"http://{self.connected_host}/save/{encoded_filename}"
+                    
+                    req = urllib.request.Request(
+                        save_url,
+                        data=new_content.encode('utf-8'),
+                        headers={'Content-Type': 'text/plain'},
+                        method='POST'
+                    )
+                    
+                    with urllib.request.urlopen(req, timeout=10) as response:
+                        result = json.loads(response.read().decode('utf-8'))
+                        if result.get('status') == 'success':
+                            self.status_label.configure(text=f"✓ Файл {filename} сохранён на сервере")
+                        else:
+                            raise Exception(result.get('message', 'Ошибка сохранения'))
+                
+                except Exception as e:
+                    messagebox.showerror("Ошибка", f"Не удалось сохранить на сервере:\n{str(e)}")
+                
+                finally:
+                    # Удаляем временный файл
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+            
+            editor = FileEditorWindow(self, temp_path, save_callback)
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось открыть файл для редактирования:\n{str(e)}")
+    
+    def navigate_up(self):
+        """Навигация вверх по директории"""
+        pass
+    
+    def refresh_files(self):
+        """Обновить список файлов"""
+        if self.connected_host:
+            self.load_remote_files()
+    
+    def on_closing(self):
+        """Обработка закрытия приложения"""
+        if self.is_server_running:
+            if messagebox.askokcancel("Выход", "Сервер работает. Остановить и выйти?"):
+                self.stop_server()
+                self.destroy()
+        else:
+            self.destroy()
 
 
-def main(page: ft.Page):
-    app = FileShareApp(page)
-
-ft.app(target=main)
+if __name__ == "__main__":
+    app = FolderShareApp()
+    app.mainloop()
